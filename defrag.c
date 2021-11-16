@@ -4,19 +4,24 @@
 #include "defrag.h"
 
 #define DEBUG 1
+#define OFFSET_INODES (buffer + 512 + BLOCKSIZE + BLOCKSIZE * sb->inode_offset)
+#define OFFSET_DATA   (buffer + 512 + BLOCKSIZE + BLOCKSIZE * sb->data_offset)
 
 superblock *sb;
 void *buffer;
 void *new_inodes;
 FILE *defraged;
+int usedcount;
 int disksize;
 
 /*Function Prototypes*/
 void read_disk(char*);
 void sanity_check();
 void get_n_inodes();
+void initialize_newdisk();
 
 int main(int argc, char *argv[]){
+	usedcount = 0;
 	if (argc != 2){
 		printf("use ./defrag.o -h for help\n");
 	}
@@ -29,12 +34,23 @@ int main(int argc, char *argv[]){
 	return(0);
 }
 
+void initialize_newdisk(char *disk){
+	char *defrag_name = (char *)malloc(strlen(disk)+strlen("-defrag")+1);
+	strcpy(defrag_name, disk);
+	strcat(defrag_name, "-defrag");
+	defraged = fopen(defrag_name, "w+");
+	free(defrag_name);
+	if (defraged == NULL) 
+			free_and_exit();
+}
+
 void read_disk(char *disk){
 	FILE *fp = fopen(disk, "r");	
 	if (fp == NULL){
 		printf("File doesn't exist\n");
 		exit(1);
 	}
+	initialize_newdisk(disk);
 	if (fseek(fp, 0, SEEK_END) == -1){
 		printf("Error seeking to end of file\n");
 		exit(1);
@@ -88,14 +104,77 @@ void get_n_inodes(){
 #define N_INODES n_inodes
 }
 
-int defrag(){
-	new_inodes = malloc(sizeof(inode) * N_INODES);
-	int inodes_position = buffer + 512 + BLOCKSIZE + 
-			BLOCKSIZE * sb->inode_offset;
-	/*copy old inodes to new_inodes*/
-	memcpy(new_inodes, inodes_position, sizeof(inode)*N_INODES);
+void block_copy(inode *orig, inode *new, int n){
+	int remaining = orig->size;
+	remaining = copy_direct(orig, new, n, remaining);
+	remaining = copy_indirect(orig, new, n, remaining);
+	remaining = copy_double(orig, new, n, remaining);
+	remaining = copy_triple(orig, new, n, remaining);
+	write_inode(new, n);
+	return;
+}
 
+int copy_direct(inode *orig, inode *new, int n, int remaining){
+	for (int i = 0; i < N_DBLOCKS; i++){
+		if (remaining <= 0)
+			break;
+		block_paste(orig->dblocks[i]);
+		new->dblocks[i] = usedcount;
+		usedcount++;
+		remaining-=BLOCKSIZE
+	}
+	return remaining;
+}
+int copy_indirect(inode *orig, inode *new, int n, int remaining){
+	for (int i = 0; i < N_IBLOCKS; i++){
+		if (remaining <= 0)
+				break;
+		//int indirect = orig->iblocks[i];
+		fill_index_block(usedcount+1, usedcount + BLOCKSIZE/4);
+		new->iblocks[i] = usedcount;
+		usedcount++;
+		/*follow pointers in the indirect pointers block*/
+		for (int j = 0; j < BLOCKSIZE; j+=4){
+			if (remaining <= 0)
+                break;
+			/*data offset in the original disk given by indirect block i at pointer j
+			 * GET RID OF CASTING?*/
+			int offset = *((int *)OFFSET_DATA + BLOCKSIZE * orig->iblocks[i] + j);
+			block_copy(offset);
+			usedcount++;
+			remaining-=BLOCKSIZE;
+		}
+
+	}
+	return remaining;
+}
+int copy_double(inode *orig, inode *new, int n, int remaining){
+	if (remaining <= 0)
+			break;
+	fill_index_block(usedcound+1, usedcount + BLOCKSIZE/4);
+	new->i2block = usedcount;
+	usedcount++;
+}
+int copy_triple(inode *orig, inode *new, int n, int remaining){
 
 }
+
+int defrag(){
+	new_inodes = malloc(sizeof(inode) * N_INODES);
+	/*copy old inodes to new_inodes*/
+	memcpy(new_inodes, OFFSET_INODES, sizeof(inode)*N_INODES);
+	/*copy all files*/
+	for (int i = 0; i < N_INODES; i++){
+		inode *curr = (inode*) (OFFSET_INODES+ i * sizeof(inode));
+		/*check if used*/
+		if(curr->nlink > 0){
+			inode *temp = (inode*) (new_inodes + i * sizeof(inode));
+			block_copy(curr, temp, i);
+		}
+	}
+	return 0;
+}
+
+
 
 
