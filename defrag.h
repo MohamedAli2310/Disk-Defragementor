@@ -8,8 +8,8 @@
 
 #define N_DBLOCKS 10
 #define N_IBLOCKS 4
-#define BLOCKSIZE 
-#define N_INODES
+#define BLOCKSIZE 512
+#define N_INODES 
 
 typedef struct superblock {
   int size;

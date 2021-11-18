@@ -1,21 +1,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "defrag.h"
 
 #define DEBUG 1
 #define OFFSET_INODES (buffer + 512 + BLOCKSIZE + BLOCKSIZE * sb->inode_offset)
 #define OFFSET_DATA   (buffer + 512 + BLOCKSIZE + BLOCKSIZE * sb->data_offset)
-
-
-/*TODO:
- * triple indirect
- * copy swap, boot, and sb
- * set free_block
- * create free_and_exit()
- * make sure you handle all errors using free_and_exit
- * function prototypes*/
-
+#define OFFSET_SWAP   (buffer + 512 + BLOCKSIZE + BLOCKSIZE * sb->swap_offset)
 
 superblock *sb;
 void *buffer;
@@ -23,12 +15,21 @@ void *new_inodes;
 FILE *defraged;
 int usedcount;
 int disksize;
+int n;
 
 /*Function Prototypes*/
 void read_disk(char*);
 void sanity_check();
 void get_n_inodes();
 void initialize_newdisk();
+void block_paste(int);
+void fill_index_block(int, int);
+void write_inode(inode *, int);
+void file_copy(inode *, inode *, int);
+int defrag();
+void free_and_exit();
+void free_all();
+
 
 int main(int argc, char *argv[]){
 	usedcount = 0;
@@ -36,11 +37,52 @@ int main(int argc, char *argv[]){
 		printf("use ./defrag.o -h for help\n");
 	}
 	else{
-		read_disk(argv[1]);
+		if (strcmp(argv[1], "-h") == 0){
+			printf("Usage: ./defrag.o [DISK IMAGE]\n Output: a new disk image with \"-defrag\" concatenated to the end of the input file name\n");
+			exit(1);
+		}
+		else{
+			read_disk(argv[1]);
+		}
 	}
 	/*Checks the attributes of the suberblock*/
 	sanity_check();
 	get_n_inodes();
+	defrag();
+	/*set free block pointer to usedcount*/
+	sb->free_block = usedcount;
+	
+	/*write boot and superblock*/
+	if (fseek(defraged, 0, SEEK_SET) == -1)
+			free_and_exit();
+	if (fwrite(buffer, 1, 512 + BLOCKSIZE, defraged) != 512 + BLOCKSIZE) 
+			free_and_exit();
+	if (fseek(defraged, 0, SEEK_END) == -1) 
+			free_and_exit();
+	/*end of empty data*/
+	void *data_end = ((void *)OFFSET_SWAP) - 1;
+	/*pointer to the current free data block*/
+	void *current_free = OFFSET_DATA + BLOCKSIZE * usedcount;
+	/*end of used data blocks*/
+	void *useddata_end = buffer + 512 + BLOCKSIZE + BLOCKSIZE * (sb->data_offset + usedcount -1) + 1;
+	/*number of free blocks to fill with pointers to the next free block*/
+	int to_fill = (data_end - useddata_end + 1) / BLOCKSIZE;
+	/*fill all blocks with pointers to next free block except the last one*/
+	for (int i = 0; i < to_fill - 1; i++){
+		*(int *) current_free = usedcount;
+		fwrite(current_free, 1, BLOCKSIZE, defraged);
+		usedcount++;
+		current_free+=BLOCKSIZE;
+	}
+	/*fill the last block with  -1*/
+	*(int *)(current_free) = -1;
+	fwrite(current_free, 1, BLOCKSIZE, defraged);
+
+	/*write swap region*/
+	void *swap = OFFSET_SWAP;
+	fwrite(swap, 1, buffer + disksize - swap -1, defraged);
+
+	free_all();
 	return(0);
 }
 
@@ -61,28 +103,22 @@ void read_disk(char *disk){
 		exit(1);
 	}
 	initialize_newdisk(disk);
-	if (fseek(fp, 0, SEEK_END) == -1){
-		printf("Error seeking to end of file\n");
-		exit(1);
-	}
+	if (fseek(fp, 0, SEEK_END) == -1)
+			free_and_exit();
 	disksize = ftell(fp);
-	if (disksize == -1) exit(1);
-	//file size too big?
-	if (fseek(fp, 0, SEEK_SET) == -1){
-        printf("Error seeking to beginning of file\n");
-        exit(1);
-    }
-	/*malloc in chunks for huge disks?*/
+	if (disksize == -1) 
+			free_and_exit();
+	if (fseek(fp, 0, SEEK_SET) == -1)
+			free_and_exit();
 	buffer = malloc(disksize);
 	if (buffer == NULL){
 		printf("Error in malloc for disksize\n");
 		exit(1);
 	}
 	/*Read disk into buffer*/
-	if (fread(buffer, 1, disksize, fp) == -1){
-		printf("Error reading disk into buffer\n");
-		exit(1);
-	}
+	if (fread(buffer, 1, disksize, fp) == -1)
+			free_and_exit();
+
 	/*read superblock and define block size
 	 * boot size is assumed to be 512*/
 	sb = (superblock*)(buffer+512);
@@ -105,13 +141,12 @@ void sanity_check(){
 }
 
 void get_n_inodes(){
-	int n_inodes = (sb->data_offset - sb->inode_offset) * BLOCKSIZE
-			/ sizeof(inode);
-	if (DEBUG==1){
-		printf("number of inodes: %d\n", n_inodes);
-	}
+	n = (sb->data_offset - sb->inode_offset) * BLOCKSIZE/ sizeof(inode);
 #undef N_INODES
-#define N_INODES n_inodes
+#define N_INODES n
+	if (DEBUG==1){
+		printf("number of inodes: %d\n", n);
+	}
 }
 
 /*pastes exactly one block to the new defraged disk given the offset of the old disk*/
@@ -150,7 +185,7 @@ void file_copy(inode *orig, inode *new, int n){
 		block_paste(orig->dblocks[i]);
 		new->dblocks[i] = usedcount;
 		usedcount++;
-		remaining-=BLOCKSIZE
+		remaining-=BLOCKSIZE;
 	}
 	//copy indirect blocks pointer blocks and data blocks
 	for (int i = 0; i < N_IBLOCKS; i++){
@@ -174,49 +209,99 @@ void file_copy(inode *orig, inode *new, int n){
 		}
 
 	}
-	//copy double indirect pointer blocks and data blocks
-	if (remaining <= 0)
-			break;
-	fill_index_block(usedcound+1, usedcount + BLOCKSIZE/4);
-	new->i2block = usedcount;
-	usedcount++;
-	/*variables to count how many blocks are actually used without decreasing the value
-	 * of "remaining", as the pointer blocks doesn't count towards inode->size*/
-	int temp = remaining;
-	int count = 0;
-	for (int i = 0; i < BLOCKSIZE/4; i++){
-		if (temp <= 0)
+	/*copy double indirect pointer blocks and data blocks
+	 * loop is only to enable breaking*/
+	for (int _ = 0; _<1; _++){
+		if (remaining <= 0)
 				break;
-		/*number of blocks referred to by one pointer block (128 blocks for a 512 disk)*/
-		int to_skip = BLOCKSIZE/4;
-		/*skip 128 per pointer block plus 128 for the higher level pointer block*/
-		int first = i * to_skip + to_skip;
-		/*we have exactly 128 pointers per block, so last is 128 away from first*/
-		int last = first + to_skip - 1;
-		fill_index_block(usedcount + first, usedcount + last);
-		count++;
-		/*this makes sure that there is actual data per pointer without decreasing remaining*/
-		temp-=BLOCKSIZE;
-	}
-	/*add however many blocks were used*/
-	usedcount+=count;
-	for (int i = 0; i < BLOCKSIZE; i+=4){
-		if (remaining<=0)
-				break;
-		int outer_offset = (*(int *) OFFSET_DATA + BLOCKSIZE * orig->i2block + i);
-		for (int j = 0; j < BLOCKSIZE; j+=4){
+		fill_index_block(usedcount+1, usedcount + BLOCKSIZE/4);
+		new->i2block = usedcount;
+		usedcount++;
+		/*variables to count how many blocks are actually used without decreasing the value
+		 * of "remaining", as the pointer blocks doesn't count towards inode->size*/
+		int temp = remaining;
+		int count = 0;
+		for (int i = 0; i < BLOCKSIZE/4; i++){
+			if (temp <= 0)
+					break;
+			/*number of blocks referred to by one pointer block (128 blocks for a 512 disk)*/
+			int to_skip = BLOCKSIZE/4;
+			/*skip 128 per pointer block plus 128 for the higher level pointer block*/
+			int first = i * to_skip + to_skip;
+			/*we have exactly 128 pointers per block, so last is 128 away from first*/
+			int last = first + to_skip - 1;
+			fill_index_block(usedcount + first, usedcount + last);
+			count++;
+			/*this makes sure that there is actual data per pointer without decreasing remaining*/
+			temp-=BLOCKSIZE;
+		}
+		/*add however many blocks were used*/
+		usedcount+=count;
+		for (int i = 0; i < BLOCKSIZE; i+=4){
 			if (remaining<=0)
 					break;
-			int inner_offset = *((int *)OFFSET_DATA + BLOCKSIZE * outer_offset + j);
-			block_paste(inner_offset);
-			usedcount++;
-			remaining-=BLOCKSIZE;
+			int outer_offset = (*(int *) OFFSET_DATA + BLOCKSIZE * orig->i2block + i);
+			for (int j = 0; j < BLOCKSIZE; j+=4){
+				if (remaining<=0)
+						break;
+				int inner_offset = *((int *)OFFSET_DATA + BLOCKSIZE * outer_offset + j);
+				block_paste(inner_offset);
+				usedcount++;
+				remaining-=BLOCKSIZE;
+			}
 		}
-
 	}
-	// copy triple indirect pointer blocks and data blocks
-	
-	/*TODO*/
+	/*copy triple indirect pointer blocks and data blocks
+	 * loop is only to enable breaking*/
+	for (int _ = 0; _<1; _++){
+		if (remaining <= 0)
+				break;
+		fill_index_block(usedcount + 1, usedcount + BLOCKSIZE/4);
+		new->i3block = usedcount;
+		usedcount++;
+		int temp = remaining;
+		int count = usedcount;
+		for (int i = 0; i < BLOCKSIZE/4; i++){
+			if(temp<=0)
+					break;
+			/*number of blocks referred to by one pointer block (128 blocks for a 512 disk)*/
+			int to_skip = BLOCKSIZE/4;
+			/*skip 128 per pointer block plus 128 for the higher level pointer block*/
+			int first = i * to_skip + to_skip;
+			/*we have exactly 128 pointers per block, so last is 128 away from first*/
+			int last = first + to_skip - 1;
+			fill_index_block(count + first, count + last);
+			usedcount++;
+			temp = temp-BLOCKSIZE;
+		}
+		/*second level pointers (after 128 blocks of lvl0 and 128*128 of lvl1)*/
+		int lvl2count = count + BLOCKSIZE/4*BLOCKSIZE/4 + BLOCKSIZE/4;
+		for (int i = 0; i < BLOCKSIZE*BLOCKSIZE; i+=(BLOCKSIZE/4)){
+			if(temp<=0)
+					break;
+			fill_index_block(lvl2count + i, lvl2count + BLOCKSIZE/4-1);
+			usedcount++;
+			temp = temp-BLOCKSIZE;
+			}
+		for (int i = 0; i < BLOCKSIZE; i+=4){
+			if (remaining <= 0)
+					break;
+			int out_offset =  *((int *) OFFSET_DATA + BLOCKSIZE*orig->i3block + i);
+			for (int j = 0; j < BLOCKSIZE; j+=4){
+				if (remaining <= 0)
+						break;
+				int mid_offset = *((int *) OFFSET_DATA + BLOCKSIZE*out_offset + j);
+				for (int k = 0; k< BLOCKSIZE; k+=4){
+					if (remaining <= 0)
+							break;
+					int in_offset = *((int *) OFFSET_DATA + BLOCKSIZE*mid_offset + k);
+					block_paste(in_offset);
+					usedcount++;
+					remaining-=BLOCKSIZE; 
+				}
+			}
+		}
+	}
 
 	// write the new inode
 	write_inode(new, n);
@@ -237,4 +322,18 @@ int defrag(){
 		}
 	}
 	return 0;
+}
+
+void free_and_exit(){
+	free(buffer);
+	free(new_inodes);
+	fclose(defraged);
+	printf("an error has occured. Exiting.\n");
+	exit(1);
+}
+
+void free_all(){
+	free(buffer);
+	free(new_inodes);
+	fclose(defraged);
 }
