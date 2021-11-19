@@ -23,7 +23,7 @@ Run using ./defrag.o [Disk Name]
     - A variable holds the value for the number of blocks remaining in the file
     - The 10 direct blocks are checked first
     - If there is still data left, indirect blocks are traced
-    - Pointer block is written and taken care of.
+    - Pointer block is written and taken care of
     - Same goes for double and triple indirect blocks
   - The new node is written in its place in the nodes area
 - Superblock is updated with the new free block pointer
